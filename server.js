@@ -9,7 +9,7 @@ dotenv.config();
 const app = express();
 
 app.use(cors({
-  origin: "https://deepsearch-frontend-six.vercel.app",
+  origin: ["https://deepsearch-frontend-six.vercel.app", "http://localhost:5173"], // Added localhost
   credentials: true,
 }));
 app.use(express.json());
