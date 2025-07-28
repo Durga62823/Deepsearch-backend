@@ -8,19 +8,19 @@ dotenv.config();
 
 const app = express();
 
-// Configure CORS options explicitly for preflight requests
+// Configure CORS options
+// The 'cors' middleware is designed to handle preflight (OPTIONS) requests automatically
+// when applied with app.use().
 const corsOptions = {
   origin: ["https://deepsearch-frontend-six.vercel.app", "http://localhost:5173"],
   credentials: true,
-  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', // Explicitly allowed methods for preflight
-  preflightContinue: false, // Set to false to let cors middleware handle preflight
-  optionsSuccessStatus: 204 // Recommended status for successful OPTIONS requests
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', // Explicitly list methods your API uses
+  allowedHeaders: ['Content-Type', 'Authorization'], // Explicitly list headers your API expects
+  optionsSuccessStatus: 204 // Recommended status for successful OPTIONS requests (handled by cors)
 };
 
-
+// Apply CORS middleware to all requests
 app.use(cors(corsOptions));
-
-app.options('*', cors(corsOptions)); // Enable pre-flight across-the-board for all routes
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -44,6 +44,7 @@ app.get('/', (req, res) => {
     res.status(200).send('DeepSearch Backend API is running!');
 });
 
+// Generic error handling middleware
 app.use((err, req, res, next) => {
   console.error('Server-wide error:', err.stack);
   res.status(500).json({ message: 'An unexpected internal server error occurred.' });
