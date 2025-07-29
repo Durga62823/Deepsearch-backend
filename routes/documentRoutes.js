@@ -24,12 +24,6 @@ const streamifier = require('streamifier');         // To convert buffer to 
 
 const fetch = require('node-fetch'); // Required for using fetch in Node.js < 18 or if not global
 
-
-
-// --- Helper for Text Cleaning ---
-
-// Function to clean raw text: remove extra whitespace, trim, etc.
-
 const cleanText = (text) => {
 
     if (!text) return '';
@@ -41,11 +35,6 @@ const cleanText = (text) => {
     return cleaned;
 
 };
-
-
-
-// --- Helper for Entity Extraction using Gemini API ---`
-
 const extractEntitiesWithGemini = async (text) => {
 
     const maxTextLength = 10000; // Limit text sent to LLM to first 10,000 characters
@@ -198,11 +187,6 @@ const extractEntitiesWithGemini = async (text) => {
     }
 
 };
-
-
-
-// Configure multer with in-memory storage for the file buffer
-
 const upload = multer({
 
     storage: multer.memoryStorage(), // Store file as a buffer in memory
@@ -240,15 +224,6 @@ const upload = multer({
     }
 
 });
-
-
-
-// @route   POST /api/documents/upload
-
-// @desc    Upload a PDF document, extract text, upload to Cloudinary, save details to MongoDB
-
-// @access  Private (requires authentication with JWT via authMiddleware)
-
 router.post(
 
     '/upload',
@@ -482,15 +457,6 @@ router.post(
     }
 
 );
-
-
-
-// @route   GET /api/documents
-
-// @desc    Get all documents for the authenticated user
-
-// @access  Private
-
 router.get('/', authMiddleware, async (req, res) => {
 
     try {
@@ -508,15 +474,6 @@ router.get('/', authMiddleware, async (req, res) => {
     }
 
 });
-
-
-
-// @route   GET /api/documents/:id/download
-
-// @desc    Proxy download a PDF document
-
-// @access  Private
-
 router.get('/:id/download', authMiddleware, async (req, res) => {
 
     console.log(`Backend: Entering GET /api/documents/:id/download route handler for ID: ${req.params.id}`);
@@ -628,15 +585,6 @@ router.get('/:id/download', authMiddleware, async (req, res) => {
     }
 
 });
-
-
-
-// @route   GET /api/documents/:id
-
-// @desc    Get a single document by ID
-
-// @access  Private
-
 router.get('/:id', authMiddleware, async (req, res) => {
 
     try {
@@ -682,15 +630,6 @@ router.get('/:id', authMiddleware, async (req, res) => {
     }
 
 });
-
-
-
-// @route   DELETE /api/documents/:id
-
-// @desc    Delete a document from MongoDB and Cloudinary
-
-// @access  Private (only document owner)
-
 router.delete('/:id', authMiddleware, async (req, res) => {
 
     console.log(`Backend: Entering DELETE /api/documents/:id route handler for ID: ${req.params.id}`);
@@ -828,7 +767,29 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     }
 
 });
-
-
-
+router.put('/:id', authMiddleware, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { isFavorite } = req.body; // Expecting isFavorite in the request body
+  
+      const document = await Document.findById(id);
+  
+      if (!document) {
+        return res.status(404).json({ message: 'Document not found' });
+      }
+  
+      // Ensure only the owner can update their document (if applicable)
+      if (document.owner.toString() !== req.user.id) { // Assuming req.user.id is set by authMiddleware
+        return res.status(403).json({ message: 'Not authorized to update this document' });
+      }
+  
+      document.isFavorite = isFavorite;
+      await document.save();
+  
+      res.status(200).json({ message: 'Document updated successfully', document });
+    } catch (error) {
+      console.error('Error updating document:', error);
+      res.status(500).json({ message: 'Server error' });
+    }
+  });
 module.exports = router;
