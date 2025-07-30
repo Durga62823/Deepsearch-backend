@@ -1,98 +1,25 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const authMiddleware = require('../middleware/authMiddleware');
-const https = require('https');
-const http = require('http');
-const cloudinary = require('../utils/cloudinary');
-const Document = require('../models/Document');
-const pdfParse = require('pdf-parse');
-const streamifier = require('streamifier');
 const fetch = require('node-fetch');
 
-const cleanText = (text) => {
-    if (!text) return '';
-    let cleaned = text.replace(/\s+/g, ' ').trim();
-    return cleaned;
-};
+// Middleware and Utilities
+const authMiddleware = require('../middleware/authMiddleware');
+const cloudinary = require('../utils/cloudinary');
+const { chunkText } = require('../utils/fileProcessor');
+const pdfParse = require('pdf-parse');
 
-const extractEntitiesWithGemini = async (text) => {
-    const maxTextLength = 10000;
-    const textForLLM = text.substring(0, Math.min(text.length, maxTextLength));
+// Models
+const Document = require('../models/Document');
 
-    let chatHistory = [];
-    const prompt = `Extract named entities (PERSON, ORG, LOCATION) from the following text.
-                    Provide the output as a JSON array where each object has 'text' (the entity name)
-                    and 'type' (one of PERSON, ORG, LOCATION). If no entities are found, return an empty array.
+// Services
+const { storeEmbeddings, queryEmbeddings } = require('../services/vectorDbService');
+const { extractEntities, generateEmbedding, generateAnswer } = require('../services/aiService');
 
-                    Text: "${textForLLM}"`;
-
-    chatHistory.push({ role: "user", parts: [{ text: prompt }] });
-
-    const payload = {
-        contents: chatHistory,
-        generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: "ARRAY",
-                items: {
-                    type: "OBJECT",
-                    properties: {
-                        "text": { "type": "STRING" },
-                        "type": { "type": "STRING", "enum": ["PERSON", "ORG", "LOCATION"] }
-                    },
-                    "propertyOrdering": ["text", "type"]
-                }
-            }
-        }
-    };
-
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    if (!apiKey) {
-        console.error("GEMINI_API_KEY is not set in environment variables. Entity extraction skipped.");
-        return [];
-    }
-
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
-
-    try {
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text();
-            throw new Error(`Gemini API error: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
-
-        const result = await response.json();
-
-        if (result.candidates && result.candidates.length > 0 &&
-            result.candidates[0].content && result.candidates[0].content.parts &&
-            result.candidates[0].content.parts.length > 0) {
-            const jsonString = result.candidates[0].content.parts[0].text;
-            const parsedEntities = JSON.parse(jsonString);
-
-            if (Array.isArray(parsedEntities)) {
-                return parsedEntities.filter(e => typeof e.text === 'string' && ['PERSON', 'ORG', 'LOCATION'].includes(e.type));
-            } else {
-                return [];
-            }
-        } else {
-            return [];
-        }
-    } catch (apiError) {
-        console.error('Error calling Gemini API for entities:', apiError);
-        return [];
-    }
-};
-
+// --- Multer Configuration ---
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 10 * 1024 * 1024 },
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
     fileFilter: (req, file, cb) => {
         if (file.mimetype && file.mimetype.startsWith('application/pdf')) {
             cb(null, true);
@@ -102,6 +29,15 @@ const upload = multer({
     }
 });
 
+// --- Helper Function ---
+const cleanText = (text) => {
+    if (!text) return '';
+    return text.replace(/\s+/g, ' ').trim();
+};
+
+// --- ROUTES ---
+
+// Upload and Process a Document
 router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) => {
     try {
         const file = req.file;
@@ -124,21 +60,12 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
             );
             stream.end(req.file.buffer);
         });
-
         const cloudinaryResult = await cloudinaryUploadPromise();
-        let rawText = '';
-        try {
-            const data = await pdfParse(file.buffer);
-            rawText = data.text;
-        } catch (pdfParseErr) {
-            rawText = '[PDF TEXT EXTRACTION FAILED]';
-        }
 
+        const rawText = (await pdfParse(file.buffer)).text;
         const cleanedText = cleanText(rawText);
-        let extractedEntities = [];
-        if (cleanedText.length > 0 && cleanedText !== '[PDF TEXT EXTRACTION FAILED]') {
-            extractedEntities = await extractEntitiesWithGemini(cleanedText);
-        }
+        
+        const extractedEntities = await extractEntities(cleanedText);
 
         const newDoc = new Document({
             title: file.originalname,
@@ -149,41 +76,44 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
             owner: req.user.id,
             entities: extractedEntities
         });
-
         await newDoc.save();
+
+        const textChunks = chunkText(cleanedText);
+        const pineconeVectors = [];
+        for (let i = 0; i < textChunks.length; i++) {
+            const chunk = textChunks[i];
+            const embedding = await generateEmbedding(chunk);
+            const chunkId = `${newDoc._id}_chunk_${i}`;
+
+            pineconeVectors.push({
+                id: chunkId,
+                values: embedding,
+                metadata: { text: chunk, documentId: newDoc._id.toString(), userId: req.user.id },
+            });
+        }
+        
+        if (pineconeVectors.length > 0) {
+            await storeEmbeddings(pineconeVectors);
+        }
+
         res.status(201).json(newDoc);
     } catch (error) {
+        console.error("Error in /upload route:", error);
         res.status(500).json({ message: 'Server error during upload.', error: error.message });
     }
 });
 
+// Get all documents for the logged-in user
 router.get('/', authMiddleware, async (req, res) => {
     try {
-        const documents = await Document.find({ owner: req.user.id }).sort({ uploadedAt: -1 });
+        const documents = await Document.find({ owner: req.user.id }).sort({ createdAt: -1 });
         res.json(documents);
     } catch (err) {
         res.status(500).send('Server Error');
     }
 });
 
-router.get('/:id/download', authMiddleware, async (req, res) => {
-    try {
-        const document = await Document.findById(req.params.id);
-        if (!document || document.owner.toString() !== req.user.id) {
-            return res.status(404).json({ message: 'Document not found or not authorized' });
-        }
-        const response = await fetch(document.cloudinaryUrl);
-        if (!response.ok) {
-            return res.status(500).json({ message: 'Failed to retrieve PDF from storage' });
-        }
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="${document.title}"`);
-        response.body.pipe(res);
-    } catch (err) {
-        res.status(500).send('Server Error during PDF download');
-    }
-});
-
+// Get a specific document by ID
 router.get('/:id', authMiddleware, async (req, res) => {
     try {
         const document = await Document.findById(req.params.id);
@@ -196,6 +126,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
     }
 });
 
+// Delete a document
 router.delete('/:id', authMiddleware, async (req, res) => {
     try {
         const document = await Document.findById(req.params.id);
@@ -206,26 +137,38 @@ router.delete('/:id', authMiddleware, async (req, res) => {
             await cloudinary.uploader.destroy(document.cloudinaryId, { resource_type: 'raw' });
         }
         await Document.findByIdAndDelete(req.params.id);
+        // Note: You should also delete the corresponding vectors from Pinecone here for a complete solution.
         res.status(200).json({ message: 'Document deleted successfully!' });
     } catch (error) {
         res.status(500).json({ message: 'Server error during deletion.' });
     }
 });
 
-router.put('/:id', authMiddleware, async (req, res) => {
+// Ask a question across all of the user's documents
+router.post('/ask', authMiddleware, async (req, res) => {
     try {
-        const { isFavorite } = req.body;
-        const document = await Document.findOneAndUpdate(
-            { _id: req.params.id, owner: req.user.id },
-            { isFavorite },
-            { new: true }
-        );
-        if (!document) {
-            return res.status(404).json({ message: 'Document not found or not authorized' });
+        const { question } = req.body;
+        const userId = req.user.id;
+
+        if (!question) {
+            return res.status(400).json({ message: 'Question is required.' });
         }
-        res.status(200).json({ message: 'Document updated successfully', document });
+
+        const questionEmbedding = await generateEmbedding(question);
+
+        const relevantChunks = await queryEmbeddings(questionEmbedding, userId, 5);
+        
+        if (relevantChunks.length === 0) {
+            return res.status(200).json({ answer: "I couldn't find any relevant information in your documents to answer that question." });
+        }
+
+        const context = relevantChunks.join('\n\n');
+        const answer = await generateAnswer(question, context);
+
+        res.status(200).json({ answer });
     } catch (error) {
-        res.status(500).json({ message: 'Server error' });
+        console.error('Error in general /ask route:', error);
+        res.status(500).json({ message: 'Server error during question answering.' });
     }
 });
 
