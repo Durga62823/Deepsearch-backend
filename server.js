@@ -8,8 +8,6 @@ dotenv.config();
 
 const app = express();
 
-// --- Recommended CORS Configuration ---
-// Define explicit CORS options for better compatibility and security.
 const corsOptions = {
   origin: ["https://deepsearch-frontend-six.vercel.app", "http://localhost:5173"],
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE", // Specify allowed methods
@@ -17,14 +15,13 @@ const corsOptions = {
   optionsSuccessStatus: 204 // Return 204 No Content for preflight requests
 };
 
-// Use the CORS middleware with your options. This should be one of the first middleware.
+
 app.use(cors(corsOptions));
 
-// Body-parsing middleware should come after CORS configuration
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- Database Connection ---
+
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/deepsearch', {})
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => {

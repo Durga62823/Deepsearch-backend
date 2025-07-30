@@ -1,48 +1,68 @@
 const { Pinecone } = require('@pinecone-database/pinecone');
 require('dotenv').config();
 
-// Initialize the Pinecone client
 const pinecone = new Pinecone({
   apiKey: process.env.PINECONE_API_KEY,
 });
 
-// Get a reference to your Pinecone index
-const index = pinecone.index(process.env.PINECONE_INDEX_NAME);
+const indexName = process.env.PINECONE_INDEX_NAME;
+if (!indexName) {
+  console.error("PINECONE_INDEX_NAME environment variable is not set.");
+}
+const pineconeIndex = pinecone.Index(indexName);
 
-/**
- * Stores text chunks and their embeddings in the vector database.
- * @param {Array<object>} chunks - An array of chunk objects, each with { id, values, metadata }.
- * @returns {Promise<void>}
- */
-const storeEmbeddings = async (chunks) => {
-  await index.upsert(chunks);
-};
+async function upsertVectors(vectors) {
+  try {
+    await pineconeIndex.upsert(vectors);
+    console.log(`Successfully upserted ${vectors.length} vectors to Pinecone index: ${indexName}.`);
+  } catch (error) {
+    console.error('Error upserting vectors to Pinecone:', error);
+    throw error;
+  }
+}
 
-/**
- * Finds the most relevant text chunks for a given question embedding,
- * filtered by the user's ID.
- * @param {number[]} questionEmbedding - The vector embedding of the user's question.
- * @param {string} userId - The ID of the user to filter the search by.
- * @param {number} topK - The number of top results to return.
- * @returns {Promise<string[]>} A promise that resolves to an array of the most relevant text chunks.
- */
-const queryEmbeddings = async (questionEmbedding, userId, topK = 3) => {
-  const queryResponse = await index.query({
-    vector: questionEmbedding,
-    topK: topK,
-    includeMetadata: true,
-    // THIS IS THE CRUCIAL UPDATE: Filter results to only this user's documents.
-    filter: {
-      userId: { '$eq': userId }
+async function queryEmbeddings(embedding, userId, topK = 5, documentId = null) {
+  try {
+    const filter = {
+      userId: { '$eq': userId },
+    };
+
+    if (documentId) {
+      filter.documentId = { '$eq': documentId };
     }
-  });
 
-  // Extract the original text from the metadata of the search results
-  const relevantChunks = queryResponse.matches.map(match => match.metadata.text);
-  return relevantChunks;
-};
+    const queryOptions = {
+      vector: embedding,
+      topK: topK,
+      includeMetadata: true,
+      filter: filter,
+    };
+
+    console.log('Pinecone query options:', JSON.stringify(queryOptions, null, 2));
+
+    const queryResponse = await pineconeIndex.query(queryOptions);
+
+    const relevantChunks = queryResponse.matches.map(match => match.metadata.text);
+    console.log(`Found ${relevantChunks.length} relevant chunks for query.`);
+    return relevantChunks;
+  } catch (error) {
+    console.error('Error querying Pinecone embeddings:', error);
+    throw error;
+  }
+}
+
+async function deleteVectorsByDocumentId(documentId) {
+  try {
+    await pineconeIndex.delete({ filter: { documentId: { '$eq': documentId } } });
+    console.log(`Successfully deleted vectors for document ID: ${documentId} from Pinecone index: ${indexName}.`);
+  } catch (error) {
+    console.error('Error deleting vectors from Pinecone:', error);
+    throw error;
+  }
+}
 
 module.exports = {
-  storeEmbeddings,
+  upsertVectors,
   queryEmbeddings,
+  deleteVectorsByDocumentId,
 };

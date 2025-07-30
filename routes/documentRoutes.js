@@ -1,19 +1,19 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const fetch = require('node-fetch');
+const fetch = require('node-fetch'); // Note: 'node-fetch' might not be needed if only using axios/other libraries
 
 // Middleware and Utilities
 const authMiddleware = require('../middleware/authMiddleware');
 const cloudinary = require('../utils/cloudinary');
-const { chunkText } = require('../utils/fileProcessor');
+const { chunkText } = require('../utils/fileProcessor'); // Assuming chunkText is from fileProcessor
 const pdfParse = require('pdf-parse');
 
 // Models
 const Document = require('../models/Document');
 
 // Services
-const { storeEmbeddings, queryEmbeddings } = require('../services/vectorDbService');
+const { upsertVectors, queryEmbeddings, deleteVectorsByDocumentId } = require('../services/vectorDbService'); // Corrected import for upsert/delete
 const { extractEntities, generateEmbedding, generateAnswer } = require('../services/aiService');
 
 // --- Multer Configuration ---
@@ -35,9 +35,7 @@ const cleanText = (text) => {
     return text.replace(/\s+/g, ' ').trim();
 };
 
-// --- ROUTES ---
 
-// Upload and Process a Document
 router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) => {
     try {
         const file = req.file;
@@ -45,6 +43,7 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
             return res.status(400).json({ message: 'No file was uploaded.' });
         }
         
+        // Upload to Cloudinary
         const cloudinaryUploadPromise = () => new Promise((resolve, reject) => {
             const stream = cloudinary.uploader.upload_stream(
                 {
@@ -62,11 +61,14 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
         });
         const cloudinaryResult = await cloudinaryUploadPromise();
 
+        // Parse PDF text
         const rawText = (await pdfParse(file.buffer)).text;
         const cleanedText = cleanText(rawText);
         
+        // Extract entities using AI
         const extractedEntities = await extractEntities(cleanedText);
 
+        // Save document metadata to MongoDB
         const newDoc = new Document({
             title: file.originalname,
             cloudinaryUrl: cloudinaryResult.secure_url,
@@ -78,22 +80,24 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
         });
         await newDoc.save();
 
+        // Chunk text and generate embeddings for Pinecone
         const textChunks = chunkText(cleanedText);
         const pineconeVectors = [];
         for (let i = 0; i < textChunks.length; i++) {
             const chunk = textChunks[i];
             const embedding = await generateEmbedding(chunk);
-            const chunkId = `${newDoc._id}_chunk_${i}`;
+            const chunkId = `${newDoc._id.toString()}_chunk_${i}`; // Ensure _id is string
 
             pineconeVectors.push({
                 id: chunkId,
                 values: embedding,
-                metadata: { text: chunk, documentId: newDoc._id.toString(), userId: req.user.id },
+                metadata: { text: chunk, documentId: newDoc._id.toString(), userId: req.user.id.toString() }, // Ensure IDs are strings
             });
         }
         
+        // Store embeddings in Pinecone
         if (pineconeVectors.length > 0) {
-            await storeEmbeddings(pineconeVectors);
+            await upsertVectors(pineconeVectors);
         }
 
         res.status(201).json(newDoc);
@@ -106,9 +110,17 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
 // Get all documents for the logged-in user
 router.get('/', authMiddleware, async (req, res) => {
     try {
-        const documents = await Document.find({ owner: req.user.id }).sort({ createdAt: -1 });
-        res.json(documents);
+        const { filter } = req.query; // Get filter from query params
+        let query = { owner: req.user.id };
+
+        if (filter === 'favorites') {
+            query.isFavorite = true;
+        }
+
+        const documents = await Document.find(query).sort({ createdAt: -1 });
+        res.json({ documents }); // Wrap in an object for consistency with frontend
     } catch (err) {
+        console.error('Error fetching documents:', err);
         res.status(500).send('Server Error');
     }
 });
@@ -120,11 +132,32 @@ router.get('/:id', authMiddleware, async (req, res) => {
         if (!document || document.owner.toString() !== req.user.id) {
             return res.status(404).json({ message: 'Document not found or not authorized' });
         }
-        res.json(document);
+        res.json({ document }); // Wrap in an object for consistency with frontend
     } catch (err) {
+        console.error('Error fetching single document:', err);
         res.status(500).send('Server Error');
     }
 });
+
+// Update a document (e.g., favorite status)
+router.put('/:id', authMiddleware, async (req, res) => {
+    try {
+        const { isFavorite } = req.body;
+        const document = await Document.findById(req.params.id);
+
+        if (!document || document.owner.toString() !== req.user.id) {
+            return res.status(404).json({ message: 'Document not found or not authorized' });
+        }
+
+        document.isFavorite = isFavorite;
+        await document.save();
+        res.status(200).json({ message: 'Document updated successfully', document });
+    } catch (error) {
+        console.error('Error updating document:', error);
+        res.status(500).json({ message: 'Server error during document update.' });
+    }
+});
+
 
 // Delete a document
 router.delete('/:id', authMiddleware, async (req, res) => {
@@ -133,41 +166,54 @@ router.delete('/:id', authMiddleware, async (req, res) => {
         if (!document || document.owner.toString() !== req.user.id) {
             return res.status(404).json({ message: 'Document not found or not authorized' });
         }
+        
+        // Delete from Cloudinary
         if (document.cloudinaryId) {
             await cloudinary.uploader.destroy(document.cloudinaryId, { resource_type: 'raw' });
         }
+
+        // Delete associated vectors from Pinecone
+        await deleteVectorsByDocumentId(document._id.toString()); // Use the new function
+
+        // Delete from MongoDB
         await Document.findByIdAndDelete(req.params.id);
-        // Note: You should also delete the corresponding vectors from Pinecone here for a complete solution.
+        
         res.status(200).json({ message: 'Document deleted successfully!' });
     } catch (error) {
+        console.error('Error deleting document:', error);
         res.status(500).json({ message: 'Server error during deletion.' });
     }
 });
 
-// Ask a question across all of the user's documents
+// Ask a question across all or specific user's documents
 router.post('/ask', authMiddleware, async (req, res) => {
     try {
-        const { question } = req.body;
-        const userId = req.user.id;
+        const { question, documentId } = req.body; // <-- Now accepting documentId from the frontend
+        const userId = req.user.id; // User ID from auth middleware
 
         if (!question) {
             return res.status(400).json({ message: 'Question is required.' });
         }
 
+        // Generate embedding for the user's question
         const questionEmbedding = await generateEmbedding(question);
 
-        const relevantChunks = await queryEmbeddings(questionEmbedding, userId, 5);
-        
+        // Query Pinecone for relevant chunks. Pass documentId if provided.
+        // The queryEmbeddings function will handle filtering by documentId.
+        const relevantChunks = await queryEmbeddings(questionEmbedding, userId, 5, documentId);
+
         if (relevantChunks.length === 0) {
             return res.status(200).json({ answer: "I couldn't find any relevant information in your documents to answer that question." });
         }
 
+        // Concatenate relevant chunks to form the context for the AI
         const context = relevantChunks.join('\n\n');
+        // Generate the answer using the AI model
         const answer = await generateAnswer(question, context);
 
         res.status(200).json({ answer });
     } catch (error) {
-        console.error('Error in general /ask route:', error);
+        console.error('Error in /ask route:', error); // Specific log for this route
         res.status(500).json({ message: 'Server error during question answering.' });
     }
 });
