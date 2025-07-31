@@ -1,21 +1,12 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 require('dotenv').config();
 
-// Initialize the Google Generative AI client
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Models for different tasks
 const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
-const generativeModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const generativeModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); // Ensure this model name is correct for your usage
 
-/**
- * Extracts named entities from text using Gemini.
- * (This is your function, now living in the service file)
- * @param {string} text - The text to process.
- * @returns {Promise<Array<object>>} A promise that resolves to an array of entities.
- */
 const extractEntities = async (text) => {
-  // Enhanced prompt to explicitly ask for *only* JSON and no markdown fences
   const prompt = `Extract named entities (PERSON, ORG, LOCATION) from the following text. Provide the output as a JSON array where each object has 'text' and 'type'. If no entities are found, return an empty JSON array.
   IMPORTANT: Only return the JSON array. Do NOT include any additional text, explanations, or Markdown code block fences (like \`\`\`json\`\`\`). The output must be valid, plain JSON.
 
@@ -24,63 +15,74 @@ const extractEntities = async (text) => {
   JSON Entities:`;
 
   try {
+    console.log("DEBUG (Entities): Sending prompt to Gemini. Prompt length:", prompt.length);
     const result = await generativeModel.generateContent(prompt);
     const response = await result.response;
-    let jsonString = response.text(); // Get the text content of the response
+    let jsonString = response.text();
 
-    console.log("Raw Gemini response for entities:", jsonString); // For debugging: log the raw response
+    console.log("DEBUG (Entities): Raw Gemini response:", jsonString);
 
-    // --- FIX FOR MARKDOWN FENCES ---
-    // Clean the response: remove Markdown code block fences if they exist
-    // This is robust because sometimes Gemini might put 'json' after the backticks
-    // and sometimes it might just use plain backticks.
     const markdownCodeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
     const match = jsonString.match(markdownCodeBlockRegex);
 
     if (match && match[1]) {
-      jsonString = match[1].trim(); // Use the captured group as the cleaned string
-      console.log("Cleaned Gemini response (after removing markdown):", jsonString);
+      jsonString = match[1].trim();
+      console.log("DEBUG (Entities): Cleaned Gemini response (after removing markdown):", jsonString);
     } else {
-      // If no markdown fences are found, just trim any leading/trailing whitespace
       jsonString = jsonString.trim();
-      console.log("Gemini response (no markdown fences found, just trimmed):", jsonString);
+      console.log("DEBUG (Entities): Gemini response (no markdown fences found, just trimmed):", jsonString);
     }
-    // --- END FIX ---
 
-    // Now try to parse the cleaned string
     const parsed = JSON.parse(jsonString);
     return Array.isArray(parsed) ? parsed : [];
   } catch (error) {
-    console.error('Error calling Gemini API for entities:', error);
-    // You might want to log the `jsonString` here if parsing fails, to see what it looked like
-    // console.error('Failed to parse string:', jsonString);
-    return []; // Return empty array on error
+    console.error('ERROR (Entities) in extractEntities (aiService.js):', error);
+    if (error.response) {
+      console.error("Gemini API Error Response Data (Entities):", error.response.data);
+      console.error("Gemini API Error Response Status (Entities):", error.response.status);
+    }
+    // Re-throw the error or return an empty array based on desired behavior
+    return []; // Return empty array on error for entity extraction
   }
 };
 
-/**
- * Creates a vector embedding for a piece of text.
- * @param {string} text - The input text to embed.
- * @returns {Promise<number[]>} A promise that resolves to the embedding vector.
- */
 const generateEmbedding = async (text) => {
-  const result = await embeddingModel.embedContent(text);
-  const embedding = result.embedding;
-  return embedding.values;
+  try {
+    const result = await embeddingModel.embedContent(text);
+    const embedding = result.embedding;
+    return embedding.values;
+  } catch (error) {
+    console.error('ERROR (Embedding) in generateEmbedding (aiService.js):', error);
+    if (error.response) {
+      console.error("Gemini API Error Response Data (Embedding):", error.response.data);
+      console.error("Gemini API Error Response Status (Embedding):", error.response.status);
+    }
+    throw new Error(`Failed to generate embedding from AI: ${error.message || 'Unknown embedding error'}`);
+  }
 };
 
-/**
- * Generates an answer to a question using provided context.
- * @param {string} question - The user's question.
- * @param {string} context - The relevant text chunks.
- * @returns {Promise<string>} A promise that resolves to the AI-generated answer.
- */
 const generateAnswer = async (question, context) => {
   const prompt = `Based strictly on the following context, answer the user's question. If the answer cannot be found in the context, state that the information is not available in the document.\n\nContext:\n${context}\n\nQuestion: ${question}`;
 
-  const result = await generativeModel.generateContent(prompt);
-  const response = await result.response;
-  return response.text();
+  try {
+    console.log("DEBUG (Answer): Sending prompt to Gemini. Prompt length:", prompt.length);
+    // Log a snippet of the context to check for excessive length
+    console.log("DEBUG (Answer): First 500 chars of context:", context.substring(0, 500)); 
+
+    const result = await generativeModel.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+
+    console.log("DEBUG (Answer): Gemini API call successful.");
+    return text;
+  } catch (error) {
+    console.error("ERROR (Answer) in generateAnswer (aiService.js):", error); // THIS IS THE CRITICAL NEW LOG
+    if (error.response) {
+      console.error("Gemini API Error Response Data (Answer):", error.response.data);
+      console.error("Gemini API Error Response Status (Answer):", error.response.status);
+    }
+    throw new Error(`Failed to generate answer from AI: ${error.message || 'Unknown AI error'}`);
+  }
 };
 
 module.exports = {

@@ -1,10 +1,8 @@
-// middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
-// dotenv.config(); // REMOVE THIS LINE if present here, it should only be in server.js
 
 module.exports = (req, res, next) => {
     const token = req.header('x-auth-token');
-    console.log("Received token:", token); // Debug log
+    console.log("Received token:", token);
 
     if (!token) {
         return res.status(401).json({ msg: 'No token, authorization denied' });
@@ -15,7 +13,7 @@ module.exports = (req, res, next) => {
         req.user = decoded.user;
         next();
     } catch (err) {
-        console.error('Token verification failed:', err.message); // Debug log
+        console.error('Token verification failed:', err.message);
 
         if (err.name === 'TokenExpiredError') {
             return res.status(401).json({ msg: 'Token expired, please log in again' });

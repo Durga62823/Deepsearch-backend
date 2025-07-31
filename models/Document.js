@@ -9,13 +9,13 @@ const documentSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  cloudinaryId: { // Added: Stores the unique ID from Cloudinary for managing the uploaded file
+  cloudinaryId: {
     type: String,
     required: true
   },
   rawText: {
     type: String,
-    required: false // Changed: Made optional as PDF text extraction might fail
+    required: false
   },
   owner: {
     type: mongoose.Schema.Types.ObjectId,
@@ -26,18 +26,17 @@ const documentSchema = new mongoose.Schema({
     type: String,
     required: false
   },
-
-  entities: [ // Retained and confirmed the detailed schema for entities
+  entities: [
     {
       text: String,
-      type: { // Represents the type of entity (e.g., PERSON, ORG)
+      type: {
         type: String,
-        enum: ['PERSON', 'ORG', 'LOCATION'], // Enforces specific types
+        enum: ['PERSON', 'ORG', 'LOCATION'],
         required: true
       }
     }
   ],
- 
-}, { timestamps: true }); // Retained: Automatically adds createdAt and updatedAt fields
+
+}, { timestamps: true });
 
 module.exports = mongoose.model('Document', documentSchema);
