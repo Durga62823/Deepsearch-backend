@@ -1,20 +1,64 @@
 const { Pinecone } = require('@pinecone-database/pinecone');
 require('dotenv').config();
 
-const pinecone = new Pinecone({
-  apiKey: process.env.PINECONE_API_KEY,
-});
+let pinecone;
+let pineconeIndex;
 
-const indexName = process.env.PINECONE_INDEX_NAME;
-if (!indexName) {
-  console.error("PINECONE_INDEX_NAME environment variable is not set.");
-}
-const pineconeIndex = pinecone.Index(indexName);
+
+const initializePinecone = async () => {
+  try {
+
+    if (pinecone && pineconeIndex) {
+      console.log('Pinecone already initialized.');
+      return;
+    }
+
+
+    if (!process.env.PINECONE_API_KEY || !process.env.PINECONE_ENVIRONMENT || !process.env.PINECONE_INDEX_NAME) {
+      throw new Error('Missing Pinecone environment variables. Please ensure PINECONE_API_KEY, PINECONE_ENVIRONMENT, and PINECONE_INDEX_NAME are set in your .env file.');
+    }
+
+    pinecone = new Pinecone({
+      apiKey: process.env.PINECONE_API_KEY,
+      environment: process.env.PINECONE_ENVIRONMENT,
+    });
+
+    const indexName = process.env.PINECONE_INDEX_NAME;
+    
+      
+    const listIndexesResponse = await pinecone.listIndexes();
+    const indexExists = listIndexesResponse.indexes?.some(index => index.name === indexName);
+
+    if (!indexExists) {
+      console.log(`Pinecone index '${indexName}' does not exist. Creating it...`);
+      await pinecone.createIndex({
+        name: indexName,
+        dimension: 768,
+        metric: 'cosine',
+        spec: { 
+          serverless: { 
+            cloud: 'aws', 
+            region: process.env.PINECONE_REGION || 'us-west-2' // Default region, override with env var
+          }
+        }
+      });
+      console.log(`Pinecone index '${indexName}' created.`);
+    }
+
+    
+    pineconeIndex = pinecone.Index(indexName);
+    console.log('Successfully connected to Pinecone and selected index.');
+  } catch (error) {
+    console.error('Failed to initialize Pinecone:', error);
+    throw new Error('Could not initialize Pinecone connection. Check your API Key, Environment, and Index Name.');
+  }
+};
 
 async function upsertVectors(vectors) {
   try {
+    await initializePinecone();
     await pineconeIndex.upsert(vectors);
-    console.log(`Successfully upserted ${vectors.length} vectors to Pinecone index: ${indexName}.`);
+    console.log(`Successfully upserted ${vectors.length} vectors to Pinecone index: ${process.env.PINECONE_INDEX_NAME}.`);
   } catch (error) {
     console.error('Error upserting vectors to Pinecone:', error);
     throw error;
@@ -23,6 +67,7 @@ async function upsertVectors(vectors) {
 
 async function queryEmbeddings(embedding, userId, topK = 5, documentId = null) {
   try {
+    await initializePinecone();
     const filter = {
       userId: { '$eq': userId },
     };
@@ -54,6 +99,7 @@ async function queryEmbeddings(embedding, userId, topK = 5, documentId = null) {
 async function deleteVectorsByDocumentId(documentId) {
   try {
     await initializePinecone();
+    
     await pineconeIndex.delete1({
       filter: {
         documentId: { '$eq': documentId }
@@ -67,6 +113,7 @@ async function deleteVectorsByDocumentId(documentId) {
 }
 
 module.exports = {
+  initializePinecone,
   upsertVectors,
   queryEmbeddings,
   deleteVectorsByDocumentId,
