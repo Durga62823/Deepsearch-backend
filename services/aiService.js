@@ -41,8 +41,8 @@ const extractEntities = async (text) => {
       console.error("Gemini API Error Response Data (Entities):", error.response.data);
       console.error("Gemini API Error Response Status (Entities):", error.response.status);
     }
-    // Re-throw the error or return an empty array based on desired behavior
-    return []; // Return empty array on error for entity extraction
+   
+    return [];
   }
 };
 
@@ -66,7 +66,7 @@ const generateAnswer = async (question, context) => {
 
   try {
     console.log("DEBUG (Answer): Sending prompt to Gemini. Prompt length:", prompt.length);
-    // Log a snippet of the context to check for excessive length
+
     console.log("DEBUG (Answer): First 500 chars of context:", context.substring(0, 500)); 
 
     const result = await generativeModel.generateContent(prompt);

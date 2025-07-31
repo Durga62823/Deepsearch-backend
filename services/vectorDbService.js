@@ -53,8 +53,13 @@ async function queryEmbeddings(embedding, userId, topK = 5, documentId = null) {
 
 async function deleteVectorsByDocumentId(documentId) {
   try {
-    await pineconeIndex.delete({ filter: { documentId: { '$eq': documentId } } });
-    console.log(`Successfully deleted vectors for document ID: ${documentId} from Pinecone index: ${indexName}.`);
+    await initializePinecone();
+    await pineconeIndex.delete1({
+      filter: {
+        documentId: { '$eq': documentId }
+      }
+    });
+    console.log(`Successfully deleted vectors for document ID: ${documentId} from Pinecone index: ${process.env.PINECONE_INDEX_NAME}.`);
   } catch (error) {
     console.error('Error deleting vectors from Pinecone:', error);
     throw error;
