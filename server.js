@@ -2,7 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
-
+const authRoutes = require('./routes/authRoutes');
+const documentRoutes = require('./routes/documentRoutes'); 
+const uploadRoutes = require('./routes/uploadRoutes');
 dotenv.config();
 
 const app = express();
@@ -26,9 +28,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/deepsearc
     process.exit(1);
   });
 
-const authRoutes = require('./routes/authRoutes');
-const documentRoutes = require('./routes/documentRoutes'); 
-const uploadRoutes = require('./routes/uploadRoutes');
+
 app.use('/api/auth', authRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/upload', uploadRoutes);

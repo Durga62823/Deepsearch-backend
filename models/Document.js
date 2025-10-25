@@ -36,6 +36,14 @@ const documentSchema = new mongoose.Schema({
       }
     }
   ],
+  isProcessed: {
+    type: Boolean,
+    default: false
+  },
+  vectorCountEstimate: {
+    type: Number,
+    default: 0
+  }
 
 }, { timestamps: true });
 

@@ -10,7 +10,7 @@ const pdfParse = require('pdf-parse');
 
 const Document = require('../models/Document');
 
-const { upsertVectors, queryEmbeddings, deleteVectorsByDocumentId } = require('../services/vectorDbService');
+const { upsertVectors, queryEmbeddings, deleteVectorsByDocumentId, checkIndexStatus, checkDocumentVectors, countVectorsByDocument } = require('../services/vectorDbService');
 const { extractEntities, generateEmbedding, generateAnswer } = require('../services/aiService');
 
 const upload = multer({
@@ -36,6 +36,7 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
         if (!file) {
             return res.status(400).json({ message: 'No file was uploaded.' });
         }
+
         const cloudinaryUploadPromise = () => new Promise((resolve, reject) => {
             const stream = cloudinary.uploader.upload_stream(
                 {
@@ -51,10 +52,12 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
             );
             stream.end(req.file.buffer);
         });
+
         const cloudinaryResult = await cloudinaryUploadPromise();
         const rawText = (await pdfParse(file.buffer)).text;
         const cleanedText = cleanText(rawText);
         const extractedEntities = await extractEntities(cleanedText);
+
         const newDoc = new Document({
             title: file.originalname,
             cloudinaryUrl: cloudinaryResult.secure_url,
@@ -65,27 +68,44 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
             entities: extractedEntities
         });
         await newDoc.save();
+
         const textChunks = chunkText(cleanedText);
         const pineconeVectors = [];
+
         for (let i = 0; i < textChunks.length; i++) {
             const chunk = textChunks[i];
             const embedding = await generateEmbedding(chunk);
-            const chunkId = `${newDoc._id.toString()}_chunk_${i}`;
+            
+            // Remove the custom ID and metadata - upsertVectors will handle this
             pineconeVectors.push({
-                id: chunkId,
                 values: embedding,
-                metadata: { text: chunk, documentId: newDoc._id.toString(), userId: req.user.id.toString() },
+                metadata: { text: chunk }
             });
         }
+
         if (pineconeVectors.length > 0) {
-            await upsertVectors(pineconeVectors);
+            // FIX: Pass all three parameters
+            await upsertVectors(pineconeVectors, newDoc._id.toString(), req.user.id);
+            console.log(`✅ Uploaded ${pineconeVectors.length} vectors for user ${req.user.id}`);
+            // Verify vectors exist in index
+            try {
+                const vecState = await checkDocumentVectors(newDoc._id.toString(), req.user.id);
+                console.log('🧮 Post-upload vector state:', vecState);
+                newDoc.isProcessed = (vecState?.countEstimate || 0) > 0;
+                newDoc.vectorCountEstimate = vecState?.countEstimate || 0;
+                await newDoc.save();
+            } catch (ve) {
+                console.warn('⚠️ Could not verify vectors after upload:', ve?.message || ve);
+            }
         }
+
         res.status(201).json(newDoc);
     } catch (error) {
         console.error("Error in /upload route:", error);
         res.status(500).json({ message: 'Server error during upload.', error: error.message });
     }
 });
+
 
 router.get('/', authMiddleware, async (req, res) => {
     try {
@@ -153,20 +173,114 @@ router.post('/ask', authMiddleware, async (req, res) => {
     try {
         const { question, documentId } = req.body;
         const userId = req.user.id;
+        
         if (!question) {
             return res.status(400).json({ message: 'Question is required.' });
         }
-        const questionEmbedding = await generateEmbedding(question);
-        const relevantChunks = await queryEmbeddings(questionEmbedding, userId, 5, documentId);
-        if (relevantChunks.length === 0) {
-            return res.status(200).json({ answer: "I couldn't find any relevant information in your documents to answer that question." });
+
+        console.log(`📝 Question from user ${userId}: "${question}"`);
+
+        // Pre-checks: document exists and owned by user
+        if (documentId) {
+            const doc = await Document.findById(documentId);
+            if (!doc || doc.owner.toString() !== userId) {
+                return res.status(404).json({ message: 'Document not found or not authorized' });
+            }
         }
-        const context = relevantChunks.join('\n\n');
-        const answer = await generateAnswer(question, context);
+
+        // Check index status first
+        try {
+            const stats = await checkIndexStatus();
+            console.log('📊 Current index status:', stats);
+        } catch (error) {
+            console.error('❌ Error checking index status:', error);
+        }
+
+        // If specific document, validate vectors exist
+        if (documentId) {
+            try {
+                const vectorState = await checkDocumentVectors(documentId, userId);
+                console.log('🧮 Document vector state:', vectorState);
+                if (!vectorState || (vectorState.countEstimate || 0) === 0) {
+                    console.warn('⚠️ No vectors found for requested document. Falling back to user-wide search.');
+                }
+            } catch (vecErr) {
+                console.error('❌ Error checking document vectors:', vecErr?.message || vecErr);
+            }
+        }
+
+        let questionEmbedding;
+        try {
+            questionEmbedding = await generateEmbedding(question);
+            console.log(`✅ Generated question embedding: ${questionEmbedding.length} dimensions`);
+        } catch (embeddingError) {
+            console.error('❌ Embedding generation failed:', embeddingError);
+            return res.status(500).json({ 
+                message: 'Failed to process your question. Please try again.' 
+            });
+        }
+
+        let relevantChunks;
+        try {
+            relevantChunks = await queryEmbeddings(questionEmbedding, userId, 10, documentId);
+            console.log(`🔍 Found ${relevantChunks.length} relevant chunks`);
+        } catch (pineconeError) {
+            console.error('❌ Pinecone query failed:', pineconeError);
+            return res.status(503).json({ 
+                message: 'Search service is temporarily unavailable. Please try again in a few moments.' 
+            });
+        }
+        
+        if (relevantChunks.length === 0) {
+            // Try user-wide fallback explicitly if not already done inside service
+            try {
+                const fallback = await queryEmbeddings(questionEmbedding, userId, 15, null);
+                if (fallback.length > 0) {
+                    relevantChunks = fallback;
+                }
+            } catch {}
+        }
+
+        if (relevantChunks.length === 0) {
+            // More specific error message and diagnostics
+            const diag = documentId ? await (async () => {
+                try { return await checkDocumentVectors(documentId, userId); } catch { return null; }
+            })() : null;
+            return res.status(200).json({ 
+                answer: "I couldn't find relevant chunks.",
+                diagnostics: {
+                    documentId: documentId || null,
+                    vectorCountEstimate: diag?.countEstimate ?? null,
+                    sample: diag?.sample ?? null
+                }
+            });
+        }
+
+        const contextText = relevantChunks.map(c => c.text).join('\n\n');
+        const answer = await generateAnswer(question, contextText);
+        
         res.status(200).json({ answer });
     } catch (error) {
-        console.error('Error in /ask route:', error);
+        console.error('❌ Error in /ask route:', error);
         res.status(500).json({ message: 'Server error during question answering.' });
+    }
+});
+
+// Debug route: count vectors for a document
+router.get('/debug/vector-count/:id', authMiddleware, async (req, res) => {
+    try {
+        const documentId = req.params.id;
+        const userId = req.user.id;
+        const doc = await Document.findById(documentId);
+        if (!doc || doc.owner.toString() !== userId) {
+            return res.status(404).json({ message: 'Document not found or not authorized' });
+        }
+        const count = await countVectorsByDocument(documentId, userId);
+        const detail = await checkDocumentVectors(documentId, userId);
+        res.json({ documentId, count, sample: detail?.sample || [] });
+    } catch (err) {
+        console.error('Error in debug vector-count:', err);
+        res.status(500).json({ message: 'Failed to fetch vector count', error: err.message });
     }
 });
 
