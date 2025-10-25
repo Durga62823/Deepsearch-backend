@@ -1,34 +1,60 @@
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 require('dotenv').config();
 
 const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
 const PERPLEXITY_MODEL = process.env.PERPLEXITY_MODEL || 'sonar-reasoning';
 
-const extractEntities = async (text) => {
-  const prompt = `From the following text, extract all named entities. Categorize them as 'PERSON', 'ORG', or 'LOCATION'.
-  Provide the output as a JSON array where each object has 'text' and 'type'.
-  If no entities are found, return an empty JSON array: [].
-  IMPORTANT: Only return the JSON array. Do NOT include any explanations or markdown fences.
-  
-  Text: "${text}"`;
+// Initialize Gemini for embeddings only
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
 
+const extractEntities = async (text) => {
+  const prompt = `Extract all named entities from the text below. Categorize them as 'PERSON', 'ORG', or 'LOCATION'.
+Return ONLY a valid JSON array. Each object must have 'text' and 'type' fields.
+If no entities found, return: []
+
+Do NOT include any text before or after the JSON array.
+Do NOT use markdown code blocks.
+Do NOT explain your answer.
+Do NOT include thinking process.
+
+Text: "${text}"`;
+
+  let result;
   try {
     const messages = [{ role: 'user', content: prompt }];
-    const result = await chatWithPerplexity(messages);
-    let jsonString = result.message || '[]';
-
-    // Robust cleaning to handle potential markdown fences
-    const markdownCodeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
-    const match = jsonString.match(markdownCodeBlockRegex);
-    if (match && match[1]) {
-      jsonString = match[1].trim();
+    result = await chatWithPerplexity(messages);
+    
+    // The chatWithPerplexity already removes <think> tags, but message might still have issues
+    let responseText = result.message || '[]';
+    
+    console.log('DEBUG extractEntities - Raw response:', responseText.substring(0, 100));
+    
+    // Remove any remaining <think> tags (shouldn't be needed but just in case)
+    responseText = responseText.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    
+    // Remove markdown code fences if present
+    responseText = responseText.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '').trim();
+    
+    // Try to find JSON array in the response
+    const arrayMatch = responseText.match(/\[[\s\S]*?\]/);
+    if (arrayMatch) {
+      responseText = arrayMatch[0];
+    } else {
+      // No array found, return empty array
+      console.warn('No JSON array found in response, returning empty array');
+      return [];
     }
     
-    // Ensure we parse the JSON
-    const parsed = JSON.parse(jsonString);
+    // Parse and validate
+    const parsed = JSON.parse(responseText);
     return Array.isArray(parsed) ? parsed : [];
 
   } catch (error) {
     console.error('ERROR in extractEntities:', error.message);
+    if (result?.message) {
+      console.error('Problematic response was:', result.message.substring(0, 200));
+    }
     return []; // Return a stable empty state on failure
   }
 };
@@ -39,12 +65,23 @@ const generateEmbedding = async (text) => {
   }
 
   try {
-    // Note: Perplexity doesn't provide embeddings API
-    // You'll need to use a different service for embeddings (OpenAI, Cohere, etc.)
-    throw new Error('Embeddings functionality requires a dedicated embedding service. Please configure OpenAI, Cohere, or similar.');
+    console.log('🔄 Generating embedding with Gemini text-embedding-004...');
+    const result = await embeddingModel.embedContent(text.trim());
+    const embedding = result.embedding;
+    
+    if (!embedding || !embedding.values || !Array.isArray(embedding.values)) {
+      throw new Error('Invalid embedding response from Gemini');
+    }
+    
+    console.log(`✅ Generated embedding with ${embedding.values.length} dimensions`);
+    return embedding.values;
   } catch (error) {
     console.error('ERROR in generateEmbedding:', error.message);
-    throw error;
+    if (error.response) {
+      console.error('Gemini API Error Response Data (Embedding):', error.response.data);
+      console.error('Gemini API Error Response Status (Embedding):', error.response.status);
+    }
+    throw new Error(`Failed to generate embedding from Gemini: ${error.message || 'Unknown embedding error'}`);
   }
 };
 
@@ -141,12 +178,27 @@ Keep responses clear, accurate, and helpful. Use examples when appropriate.`;
     const data = await response.json();
     const fullResponse = data.choices?.[0]?.message?.content || 'No response generated';
     
+    console.log('DEBUG chatWithPerplexity - Full response:', fullResponse.substring(0, 150));
+    
     // Extract thinking content from <think> tags
     const thinkMatch = fullResponse.match(/<think>([\s\S]*?)<\/think>/);
     const reasoning = thinkMatch ? thinkMatch[1].trim() : (data.choices?.[0]?.message?.reasoning || null);
 
-    // Remove <think> tags from the actual message
-    const messageText = fullResponse.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    // Remove ALL <think> tags from the actual message (use global flag)
+    let messageText = fullResponse.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    
+    // Extra cleanup: remove any text that's not JSON (before first [ or {)
+    // Find the first [ or { and start from there
+    const jsonStart = Math.max(
+      messageText.indexOf('[') !== -1 ? messageText.indexOf('[') : Infinity,
+      messageText.indexOf('{') !== -1 ? messageText.indexOf('{') : Infinity
+    );
+    
+    if (jsonStart !== Infinity && jsonStart < messageText.length) {
+      messageText = messageText.substring(jsonStart).trim();
+    }
+
+    console.log('DEBUG chatWithPerplexity - Cleaned message:', messageText.substring(0, 150));
 
     return {
       message: messageText || 'Sorry, I couldn\'t generate a response.',

@@ -99,9 +99,14 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
             }
         }
 
-        res.status(201).json(newDoc);
+        console.log('✅ Upload successful, sending response to frontend...');
+        res.status(201).json({
+            message: 'Document uploaded and analyzed successfully!',
+            document: newDoc
+        });
     } catch (error) {
-        console.error("Error in /upload route:", error);
+        console.error("❌ Error in /upload route:", error);
+        console.error("❌ Error stack:", error.stack);
         res.status(500).json({ message: 'Server error during upload.', error: error.message });
     }
 });
