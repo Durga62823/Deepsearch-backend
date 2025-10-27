@@ -56,7 +56,24 @@ router.post('/upload', authMiddleware, upload.single('pdf'), async (req, res) =>
         const cloudinaryResult = await cloudinaryUploadPromise();
         const rawText = (await pdfParse(file.buffer)).text;
         const cleanedText = cleanText(rawText);
-        const extractedEntities = await extractEntities(cleanedText);
+        
+        // Extract entities with error handling
+        let extractedEntities = [];
+        try {
+            console.log('🔍 Starting entity extraction...');
+            extractedEntities = await extractEntities(cleanedText);
+            console.log(`✅ Entity extraction complete: ${extractedEntities.length} entities found`);
+            
+            // Validate entities is an array
+            if (!Array.isArray(extractedEntities)) {
+                console.warn('⚠️ extractEntities did not return an array, using empty array');
+                extractedEntities = [];
+            }
+        } catch (entityError) {
+            console.error('❌ Entity extraction failed:', entityError.message);
+            console.error('Continuing with empty entities array');
+            extractedEntities = [];
+        }
 
         const newDoc = new Document({
             title: file.originalname,

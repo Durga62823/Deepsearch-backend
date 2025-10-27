@@ -9,53 +9,82 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
 
 const extractEntities = async (text) => {
-  const prompt = `Extract all named entities from the text below. Categorize them as 'PERSON', 'ORG', or 'LOCATION'.
-Return ONLY a valid JSON array. Each object must have 'text' and 'type' fields.
-If no entities found, return: []
+  // If text is too long, truncate it for entity extraction
+  const maxTextLength = 2000; // Reduced for better results
+  const textToAnalyze = text.length > maxTextLength ? text.substring(0, maxTextLength) : text;
+  
+  // Skip entity extraction if PERPLEXITY_API_KEY is not configured
+  if (!PERPLEXITY_API_KEY) {
+    console.warn('⚠️ PERPLEXITY_API_KEY not configured, skipping entity extraction');
+    return [];
+  }
+  
+  const prompt = `Extract named entities from this text. Return ONLY a JSON array.
+Each item: {"text":"entity name","type":"PERSON or ORG or LOCATION"}
+If none found, return: []
 
-Do NOT include any text before or after the JSON array.
-Do NOT use markdown code blocks.
-Do NOT explain your answer.
-Do NOT include thinking process.
+NO explanations. NO markdown. ONLY the JSON array.
 
-Text: "${text}"`;
+Text: "${textToAnalyze.replace(/"/g, '\\"').substring(0, 1500)}"`;
 
-  let result;
   try {
     const messages = [{ role: 'user', content: prompt }];
-    result = await chatWithPerplexity(messages);
+    const result = await chatWithPerplexity(messages, null, true); // Pass true for JSON mode
     
-    // The chatWithPerplexity already removes <think> tags, but message might still have issues
-    let responseText = result.message || '[]';
+    let responseText = (result.message || '[]').trim();
     
-    console.log('DEBUG extractEntities - Raw response:', responseText.substring(0, 100));
+    console.log('DEBUG extractEntities - Raw response (first 200 chars):', responseText.substring(0, 200));
     
-    // Remove any remaining <think> tags (shouldn't be needed but just in case)
-    responseText = responseText.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    // Clean up response
+    responseText = responseText
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/```(?:json)?\s*/gi, '')
+      .replace(/```\s*/gi, '')
+      .trim();
     
-    // Remove markdown code fences if present
-    responseText = responseText.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '').trim();
+    // Extract JSON array
+    const firstBracket = responseText.indexOf('[');
+    const lastBracket = responseText.lastIndexOf(']');
     
-    // Try to find JSON array in the response
-    const arrayMatch = responseText.match(/\[[\s\S]*?\]/);
-    if (arrayMatch) {
-      responseText = arrayMatch[0];
-    } else {
-      // No array found, return empty array
-      console.warn('No JSON array found in response, returning empty array');
+    if (firstBracket === -1 || lastBracket === -1 || firstBracket >= lastBracket) {
+      console.warn('No valid JSON array found, returning empty array');
       return [];
     }
     
-    // Parse and validate
+    responseText = responseText.substring(firstBracket, lastBracket + 1);
+    
+    console.log('DEBUG extractEntities - Cleaned:', responseText.substring(0, 200));
+    
+    // Parse JSON
     const parsed = JSON.parse(responseText);
-    return Array.isArray(parsed) ? parsed : [];
+    
+    if (!Array.isArray(parsed)) {
+      console.warn('Parsed result is not an array');
+      return [];
+    }
+    
+    // Validate and clean entities
+    const validEntities = parsed
+      .filter(entity => {
+        return entity && 
+               typeof entity === 'object' && 
+               typeof entity.text === 'string' && 
+               entity.text.trim().length > 0 &&
+               typeof entity.type === 'string' &&
+               ['PERSON', 'ORG', 'LOCATION'].includes(entity.type.toUpperCase());
+      })
+      .map(entity => ({
+        text: entity.text.trim(),
+        type: entity.type.toUpperCase()
+      }))
+      .slice(0, 50); // Limit to 50 entities max
+    
+    console.log(`✅ Extracted ${validEntities.length} valid entities`);
+    return validEntities;
 
   } catch (error) {
     console.error('ERROR in extractEntities:', error.message);
-    if (result?.message) {
-      console.error('Problematic response was:', result.message.substring(0, 200));
-    }
-    return []; // Return a stable empty state on failure
+    return [];
   }
 };
 
@@ -103,7 +132,7 @@ Question: ${question}`;
   }
 };
 
-const chatWithPerplexity = async (messages, conversationContext = null) => {
+const chatWithPerplexity = async (messages, conversationContext = null, forceNoThinking = false) => {
   if (!PERPLEXITY_API_KEY) {
     throw new Error('PERPLEXITY_API_KEY not configured. Please add it to your .env file.');
   }
@@ -162,8 +191,8 @@ Keep responses clear, accurate, and helpful. Use examples when appropriate.`;
       body: JSON.stringify({
         model: PERPLEXITY_MODEL,
         messages: perplexityMessages,
-        max_tokens: 1024,
-        temperature: 0.7,
+        max_tokens: forceNoThinking ? 512 : 1024,
+        temperature: forceNoThinking ? 0.1 : 0.7,
         top_p: 0.9,
         stream: false,
       }),
@@ -178,7 +207,9 @@ Keep responses clear, accurate, and helpful. Use examples when appropriate.`;
     const data = await response.json();
     const fullResponse = data.choices?.[0]?.message?.content || 'No response generated';
     
-    console.log('DEBUG chatWithPerplexity - Full response:', fullResponse.substring(0, 150));
+    if (!forceNoThinking) {
+      console.log('DEBUG chatWithPerplexity - Full response:', fullResponse.substring(0, 150));
+    }
     
     // Extract thinking content from <think> tags
     const thinkMatch = fullResponse.match(/<think>([\s\S]*?)<\/think>/);
@@ -187,18 +218,22 @@ Keep responses clear, accurate, and helpful. Use examples when appropriate.`;
     // Remove ALL <think> tags from the actual message (use global flag)
     let messageText = fullResponse.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     
-    // Extra cleanup: remove any text that's not JSON (before first [ or {)
-    // Find the first [ or { and start from there
-    const jsonStart = Math.max(
-      messageText.indexOf('[') !== -1 ? messageText.indexOf('[') : Infinity,
-      messageText.indexOf('{') !== -1 ? messageText.indexOf('{') : Infinity
-    );
-    
-    if (jsonStart !== Infinity && jsonStart < messageText.length) {
-      messageText = messageText.substring(jsonStart).trim();
+    // For JSON extraction mode, clean more aggressively
+    if (forceNoThinking) {
+      // Find the first [ or { and start from there
+      const jsonStart = Math.max(
+        messageText.indexOf('[') !== -1 ? messageText.indexOf('[') : Infinity,
+        messageText.indexOf('{') !== -1 ? messageText.indexOf('{') : Infinity
+      );
+      
+      if (jsonStart !== Infinity && jsonStart < messageText.length) {
+        messageText = messageText.substring(jsonStart).trim();
+      }
     }
 
-    console.log('DEBUG chatWithPerplexity - Cleaned message:', messageText.substring(0, 150));
+    if (!forceNoThinking) {
+      console.log('DEBUG chatWithPerplexity - Cleaned message:', messageText.substring(0, 150));
+    }
 
     return {
       message: messageText || 'Sorry, I couldn\'t generate a response.',

@@ -26,16 +26,19 @@ const documentSchema = new mongoose.Schema({
     type: String,
     required: false
   },
-  entities: [
-    {
-      text: String,
-      type: {
-        type: String,
-        enum: ['PERSON', 'ORG', 'LOCATION'],
-        required: true
+  entities: {
+    type: [
+      {
+        text: { type: String, required: true },
+        type: {
+          type: String,
+          enum: ['PERSON', 'ORG', 'LOCATION'],
+          required: true
+        }
       }
-    }
-  ],
+    ],
+    default: []
+  },
   isProcessed: {
     type: Boolean,
     default: false
